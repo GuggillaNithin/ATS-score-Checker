@@ -180,8 +180,8 @@ def send_email(to_email, subject, message_body):
     """
     Send an email using Gmail SMTP credentials from environment variables.
     """
-    email_user = "info@maplelearningsolutions.com"
-    email_pass = "bcfanvwtafpdiunh"
+    email_user = os.getenv("EMAIL_USER")
+    email_pass = os.getenv("EMAIL_PASS")
 
     if not email_user or not email_pass:
         return False, "Missing EMAIL_USER or EMAIL_PASS environment variables."
