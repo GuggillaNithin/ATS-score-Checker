@@ -7,11 +7,20 @@ import numpy as np
 import pandas as pd
 from io import BytesIO
 from email.message import EmailMessage
-from dotenv import load_dotenv
 from pdfminer.high_level import extract_text
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 from streamlit.errors import StreamlitSecretNotFoundError
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv():
+        """
+        Fallback no-op when python-dotenv is not installed.
+        Streamlit secrets and existing environment variables can still be used.
+        """
+        return False
 
 load_dotenv()
 
@@ -176,9 +185,47 @@ def extract_phone(text):
 
     return phone
 
+def extract_candidate_name(text, resume_file_name=""):
+    """
+    Infer a candidate name from resume text, with a filename fallback.
+    """
+    if text:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines[:12]:
+            normalized_line = re.sub(r"\s+", " ", line).strip(" ,.-:_")
+
+            if not normalized_line:
+                continue
+
+            # Skip likely contact/details lines rather than a name header.
+            if "@" in normalized_line or re.search(r"\d", normalized_line):
+                continue
+
+            words = normalized_line.split()
+            if not 2 <= len(words) <= 4:
+                continue
+
+            if any(len(word) <= 1 for word in words):
+                continue
+
+            if any(not re.fullmatch(r"[A-Za-z][A-Za-z'.-]*", word) for word in words):
+                continue
+
+            return " ".join(word.capitalize() for word in words)
+
+    fallback_name = resume_file_name.rsplit(".", 1)[0] if resume_file_name else "Candidate"
+    fallback_name = re.sub(r"[_\-]+", " ", fallback_name)
+    fallback_name = re.sub(r"\b(resume|cv|profile|final|updated)\b", "", fallback_name, flags=re.IGNORECASE)
+    fallback_name = re.sub(r"\s+", " ", fallback_name).strip(" ,.-:_")
+
+    if fallback_name:
+        return " ".join(word.capitalize() for word in fallback_name.split())
+
+    return "Candidate"
+
 def send_email(to_email, subject, message_body):
     """
-    Send an email using Gmail SMTP credentials from environment variables.
+    Send an HTML email using Gmail SMTP credentials from environment variables.
     """
     email_user = os.getenv("EMAIL_USER")
     email_pass = os.getenv("EMAIL_PASS")
@@ -191,7 +238,8 @@ def send_email(to_email, subject, message_body):
         msg["Subject"] = subject
         msg["From"] = email_user
         msg["To"] = to_email
-        msg.set_content(message_body)
+        msg.set_content("This email contains HTML content. Please view it in an HTML-compatible email client.")
+        msg.add_alternative(message_body, subtype="html")
 
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
@@ -340,6 +388,7 @@ def main():
                     resume_embedding = model.encode(resume_cleaned)
                     extracted_email = extract_email(resume_raw)
                     extracted_phone = extract_phone(resume_raw)
+                    candidate_name = extract_candidate_name(resume_raw, resume_file.name)
                     
                     if resume_embedding is not None:
                         similarity = cosine_similarity(
@@ -350,6 +399,7 @@ def main():
                         score = float(similarity) * 100
                         results.append({
                             "Resume Name": resume_file.name,
+                            "Candidate Name": candidate_name,
                             "Score (%)": round(score, 2),
                             "Email": extracted_email,
                             "Phone": extracted_phone,
@@ -440,14 +490,85 @@ def main():
         email_template = st.text_area(
             "Message",
             value=(
-                "Hi {name},\n\n"
-                "Congratulations! Based on your resume, you have been shortlisted.\n\n"
-                "Please complete your assessment here:\n"
-                "{assessment_link}\n\n"
-                "Best regards,\n"
-                "Hiring Team"
+                "<!DOCTYPE html>\n"
+                "<html lang=\"en\">\n"
+                "<head>\n"
+                "  <meta charset=\"UTF-8\">\n"
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+                "  <title>Interview Invitation</title>\n"
+                "</head>\n"
+                "<body style=\"margin:0; padding:0; font-family: Arial, sans-serif;\">\n\n"
+                "  <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\">\n"
+                "    <tr>\n"
+                "      <td align=\"center\">\n\n"
+                "        <table width=\"600\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\">\n\n"
+                "          <tr>\n"
+                "            <td>\n"
+                "              <img src=\"https://maple.maplelearningsolutions.com/wp-content/uploads/2026/04/Purple-Gradient-Graphic-Designer-Email-Header.png\" alt=\"Header Image\" width=\"100%\" style=\"display:block; border:0; outline:none; text-decoration:none;\">\n"
+                "            </td>\n"
+                "          </tr>\n\n"
+                "          <tr>\n"
+                "            <td style=\"padding:20px; line-height:1.6;\">\n\n"
+                "              <h2>Hi {name},</h2>\n\n"
+                "              <p>Congratulations! We're pleased to inform you that, based on your resume and profile, you have been shortlisted for the next stage of our hiring process.</p>\n\n"
+                "              <p>As a next step, we invite you to complete an assessment that will help us better understand your skills and suitability for the role. This assessment is an important part of our evaluation process.</p>\n\n"
+                "              <p><strong>Assessment Details:</strong></p>\n\n"
+                "              <ul>\n"
+                "                <li><strong>Access Link:</strong> <a href=\"{assessment_link}\" style=\"text-decoration:none;\">Assessment Details</a></li>\n"
+                "              </ul>\n\n"
+                "              <p>We recommend completing the assessment in one sitting in a quiet environment with a stable internet connection. Kindly ensure that you submit your responses within the given timeframe.</p>\n\n"
+                "              <p>If you have any questions or face any technical difficulties, feel free to reach out to us - we'll be happy to assist you.</p>\n\n"
+                "              <p>We wish you the very best and look forward to reviewing your submission.</p>\n\n"
+                "              <p>Best regards,<br>\n"
+                "              Hiring Team</p>\n\n"
+                "            </td>\n"
+                "          </tr>\n\n"
+                "          <tr>\n"
+                "            <td style=\"background-color:#000000; padding:20px; color:#ffffff;\">\n\n"
+                "              <table width=\"100%\" role=\"presentation\">\n"
+                "                <tr>\n"
+                "                  <td align=\"center\">\n"
+                "                    <img src=\"https://maple.maplelearningsolutions.com/wp-content/uploads/2026/04/Logo_Maple-1.png\" alt=\"Company Logo\" style=\"display:block; border:0; width:120px; outline:none; text-decoration:none; margin-bottom:10px;\">\n"
+                "                  </td>\n"
+                "                </tr>\n"
+                "              </table>\n\n"
+                "              <table width=\"100%\" role=\"presentation\">\n"
+                "                <tr>\n"
+                "                  <td align=\"center\" style=\"padding:10px 0;\">\n"
+                "                    <a href=\"https://www.maplelearningsolutions.com/\" style=\"margin:0 10px; text-decoration:none; color:#ffffff; border:none;\">Home</a>\n"
+                "                    <a href=\"https://www.maplelearningsolutions.com/career\" style=\"margin:0 10px; text-decoration:none; color:#ffffff; border:none;\">Careers</a>\n"
+                "                    <a href=\"mailto:info@maplelearningsolutions.com\" style=\"margin:0 10px; text-decoration:none; color:#ffffff; border:none;\">Contact</a>\n"
+                "                  </td>\n"
+                "                </tr>\n"
+                "              </table>\n\n"
+                "              <table width=\"100%\" role=\"presentation\">\n"
+                "                <tr>\n"
+                "                  <td align=\"center\" style=\"padding-top:10px;\">\n\n"
+                "                    <a href=\"https://www.facebook.com/people/Maple-Learning-Solutions/61578896339989/\" style=\"text-decoration:none; border:none; display:inline-block; padding:0 6px;\">\n"
+                "                      <img src=\"https://cdn-icons-png.flaticon.com/24/733/733547.png\" alt=\"Facebook\" style=\"display:block; border:0; outline:none;\">\n"
+                "                    </a>\n\n"
+                "                    <a href=\"https://www.youtube.com/channel/UCObkCM6XEdSA96dUwUbnV-g\" style=\"text-decoration:none; border:none; display:inline-block; padding:0 6px;\">\n"
+                "                      <img src=\"https://cdn-icons-png.flaticon.com/24/1384/1384060.png\" alt=\"YouTube\" style=\"display:block; border:0; outline:none;\">\n"
+                "                    </a>\n\n"
+                "                    <a href=\"https://www.linkedin.com/company/maple-learning-solutions/posts/?feedView=all\" style=\"text-decoration:none; border:none; display:inline-block; padding:0 6px;\">\n"
+                "                      <img src=\"https://cdn-icons-png.flaticon.com/24/174/174857.png\" alt=\"LinkedIn\" style=\"display:block; border:0; outline:none;\">\n"
+                "                    </a>\n\n"
+                "                    <a href=\"https://www.instagram.com/maple_learning_solutions\" style=\"text-decoration:none; border:none; display:inline-block; padding:0 6px;\">\n"
+                "                      <img src=\"https://cdn-icons-png.flaticon.com/24/733/733558.png\" alt=\"Instagram\" style=\"display:block; border:0; outline:none;\">\n"
+                "                    </a>\n\n"
+                "                  </td>\n"
+                "                </tr>\n"
+                "              </table>\n\n"
+                "            </td>\n"
+                "          </tr>\n\n"
+                "        </table>\n\n"
+                "      </td>\n"
+                "    </tr>\n"
+                "  </table>\n\n"
+                "</body>\n"
+                "</html>"
             ),
-            height=180
+            height=520
         )
 
         invitation_df = pd.DataFrame(results_df)
@@ -490,7 +611,10 @@ def main():
 
                     with st.spinner("Sending assessment invitations..."):
                         for candidate in candidates_to_send:
-                            candidate_name = candidate["Resume Name"].rsplit(".", 1)[0]
+                            candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                                candidate.get("Resume Text", ""),
+                                candidate["Resume Name"]
+                            )
                             personalized_message = email_template.format(
                                 name=candidate_name,
                                 assessment_link=assessment_link
@@ -527,7 +651,10 @@ def main():
                                 logged_count += 1
 
                         for candidate in invalid_shortlisted_df.head(20).to_dict("records"):
-                            candidate_name = candidate["Resume Name"].rsplit(".", 1)[0]
+                            candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                                candidate.get("Resume Text", ""),
+                                candidate["Resume Name"]
+                            )
                             logged, log_feedback = log_to_google_sheet(
                                 candidate_name,
                                 candidate.get("Email") or "",
@@ -569,7 +696,10 @@ def main():
                     disabled=send_disabled,
                     use_container_width=True
                 ):
-                    candidate_name = candidate["Resume Name"].rsplit(".", 1)[0]
+                    candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                        candidate.get("Resume Text", ""),
+                        candidate["Resume Name"]
+                    )
                     personalized_message = email_template.format(
                         name=candidate_name,
                         assessment_link=assessment_link
