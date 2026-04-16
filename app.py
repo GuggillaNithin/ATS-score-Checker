@@ -250,6 +250,52 @@ def send_email(to_email, subject, message_body):
     except Exception as e:
         return False, str(e)
 
+
+def get_candidate_email_key(candidate):
+    """
+    Build a stable Streamlit session key for a candidate email field.
+    """
+    rank = candidate.get("Rank", "unknown")
+    resume_name = candidate.get("Resume Name", "candidate")
+    safe_resume_name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(resume_name)).strip("_")
+    return f"candidate_email_{rank}_{safe_resume_name}"
+
+
+def get_candidate_name_key(candidate):
+    """
+    Build a stable Streamlit session key for a candidate name field.
+    """
+    rank = candidate.get("Rank", "unknown")
+    resume_name = candidate.get("Resume Name", "candidate")
+    safe_resume_name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(resume_name)).strip("_")
+    return f"candidate_name_{rank}_{safe_resume_name}"
+
+
+def get_invitation_candidates(results_data):
+    """
+    Return invitation candidates with editable name and email values from session state.
+    """
+    invitation_candidates = []
+
+    for candidate in results_data:
+        candidate_copy = dict(candidate)
+        name_key = get_candidate_name_key(candidate_copy)
+        email_key = get_candidate_email_key(candidate_copy)
+
+        if name_key not in st.session_state:
+            st.session_state[name_key] = (candidate_copy.get("Candidate Name") or "").strip()
+
+        if email_key not in st.session_state:
+            st.session_state[email_key] = (candidate_copy.get("Email") or "").strip()
+
+        candidate_copy["Candidate Name"] = (st.session_state.get(name_key) or "").strip()
+        candidate_copy["Name Key"] = name_key
+        candidate_copy["Email"] = (st.session_state.get(email_key) or "").strip()
+        candidate_copy["Email Key"] = email_key
+        invitation_candidates.append(candidate_copy)
+
+    return invitation_candidates
+
 def log_to_google_sheet(name, email, phone, score, resume_name, status):
     """
     Log invitation activity to a Google Sheet webhook without interrupting the app.
@@ -571,7 +617,8 @@ def main():
             height=520
         )
 
-        invitation_df = pd.DataFrame(results_df)
+        invitation_candidates = get_invitation_candidates(results_df)
+        invitation_df = pd.DataFrame(invitation_candidates)
         shortlisted_df = invitation_df[invitation_df["Score (%)"] >= invitation_threshold].copy()
         valid_shortlisted_df = shortlisted_df[shortlisted_df["Email"].notna() & (shortlisted_df["Email"] != "")]
         invalid_shortlisted_df = shortlisted_df[shortlisted_df["Email"].isna() | (shortlisted_df["Email"] == "")]
@@ -611,7 +658,7 @@ def main():
 
                     with st.spinner("Sending assessment invitations..."):
                         for candidate in candidates_to_send:
-                            candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                            candidate_name = (candidate.get("Candidate Name") or "").strip() or extract_candidate_name(
                                 candidate.get("Resume Text", ""),
                                 candidate["Resume Name"]
                             )
@@ -651,7 +698,7 @@ def main():
                                 logged_count += 1
 
                         for candidate in invalid_shortlisted_df.head(20).to_dict("records"):
-                            candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                            candidate_name = (candidate.get("Candidate Name") or "").strip() or extract_candidate_name(
                                 candidate.get("Resume Text", ""),
                                 candidate["Resume Name"]
                             )
@@ -677,18 +724,34 @@ def main():
 
         st.markdown("#### Candidate Actions")
 
-        for candidate in invitation_df.to_dict("records"):
+        for candidate in invitation_candidates:
             is_eligible = candidate["Score (%)"] >= invitation_threshold
-            has_email = bool(candidate.get("Email"))
+            name_key = candidate["Name Key"]
+            email_key = candidate["Email Key"]
 
-            row_col1, row_col2, row_col3, row_col4 = st.columns([3, 1, 3, 2])
+            row_col1, row_col2, row_col3, row_col4, row_col5 = st.columns([3, 1, 3, 3, 2])
             with row_col1:
                 st.write(candidate["Resume Name"])
             with row_col2:
                 st.write(f"{candidate['Score (%)']:.2f}%")
             with row_col3:
-                st.write(candidate["Email"] if has_email else "Email not found")
+                st.text_input(
+                    "Candidate Name",
+                    key=name_key,
+                    label_visibility="collapsed",
+                    placeholder="Enter candidate name"
+                )
+                current_name = (st.session_state.get(name_key) or "").strip()
             with row_col4:
+                st.text_input(
+                    "Email",
+                    key=email_key,
+                    label_visibility="collapsed",
+                    placeholder="Enter candidate email"
+                )
+                current_email = (st.session_state.get(email_key) or "").strip()
+                has_email = bool(current_email)
+            with row_col5:
                 send_disabled = not (is_eligible and has_email)
                 if st.button(
                     "Send Invitation",
@@ -696,7 +759,7 @@ def main():
                     disabled=send_disabled,
                     use_container_width=True
                 ):
-                    candidate_name = candidate.get("Candidate Name") or extract_candidate_name(
+                    candidate_name = current_name or extract_candidate_name(
                         candidate.get("Resume Text", ""),
                         candidate["Resume Name"]
                     )
@@ -707,26 +770,26 @@ def main():
 
                     with st.spinner(f"Sending invitation to {candidate['Resume Name']}..."):
                         success, feedback = send_email(
-                            candidate["Email"],
+                            current_email,
                             email_subject,
                             personalized_message
                         )
 
                     if success:
-                        st.success(f"✅ Email sent successfully to {candidate['Email']}")
+                        st.success(f"✅ Email sent successfully to {current_email}")
                         logged, log_feedback = log_to_google_sheet(
                             candidate_name,
-                            candidate["Email"],
+                            current_email,
                             candidate.get("Phone") or "",
                             candidate["Score (%)"],
                             candidate["Resume Name"],
                             "Sent"
                         )
                     else:
-                        st.error(f"❌ Failed to send to {candidate['Email']}: {feedback}")
+                        st.error(f"❌ Failed to send to {current_email}: {feedback}")
                         logged, log_feedback = log_to_google_sheet(
                             candidate_name,
-                            candidate["Email"],
+                            current_email,
                             candidate.get("Phone") or "",
                             candidate["Score (%)"],
                             candidate["Resume Name"],
